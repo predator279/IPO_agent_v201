@@ -10,7 +10,7 @@ langchain-community
 langchain-groq
 langchain-huggingface
 langchain-pinecone
-pinecone-client
+pinecone
 supabase
 sentence-transformers
 rapidfuzz
