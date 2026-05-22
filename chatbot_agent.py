@@ -13,7 +13,6 @@
 #   6. Progress bar wired to the new document_processor callback.
 
 import os
-import gc
 import shutil
 from typing import Optional
 
@@ -72,49 +71,107 @@ def _safe_name(ipo_name: str) -> str:
 
 def process_and_store_document(ipo_name: str, st_progress_bar=None):
     """
-    Processes PDFs one-by-one and flushes RAM after each upload to Pinecone.
+    Downloads ALL RHP/DRHP PDFs for the IPO (main prospectus + any supplementary
+    docs above 2 MB), parses each with pdfplumber, and embeds everything into a
+    single ChromaDB vectorstore.
+
+    - Skips addenda / cover pages (< 2 MB).
+    - Processes files from largest to smallest so the main RHP is indexed first.
+    - Progress bar covers: download → parse (60%) → embed (40%).
     """
+    # persist_directory = os.path.join(VECTORSTORE_BASE_PATH, _safe_name(ipo_name))
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
-    # 1. Check if already processed
+    # ── load from cache ───────────────────────────────────────────────────────
     if namespace_exists(ipo_name):
-        print(f"✅ Namespace '{ipo_name}' exists in Pinecone.")
-        return PineconeVectorStore(index_name=PINECONE_INDEX_NAME, embedding=embeddings, namespace=ipo_name)
+        print(f"✅ Vector store for '{ipo_name}' found in Pinecone. Loading…")
+        return PineconeVectorStore(index_name="ipo-rhp-index", embedding=embeddings, namespace=ipo_name)
 
-    # 2. Get PDF Paths
+    print(f"🚧 No cache for '{ipo_name}'. Starting full pipeline.")
+
+    # ── download all PDFs ─────────────────────────────────────────────────────
+    if st_progress_bar:
+        st_progress_bar.progress(0.02, text="Searching for RHP/DRHP documents…")
+
     pdf_paths = find_and_download_all_pdfs(ipo_name)
-    if not pdf_paths: return None
+    if not pdf_paths:
+        print(f"❌ No documents found for {ipo_name}.")
+        return None
 
-    vectorstore = None
+    print(f"📚 Processing {len(pdf_paths)} document(s).")
 
-    # 3. Process documents one-by-one to save RAM
-    for idx, pdf_path in enumerate(pdf_paths):
-        if st_progress_bar:
-            st_progress_bar.progress(0.2 + (idx * 0.2), text=f"Parsing {os.path.basename(pdf_path)}...")
-        
-        # We cap pages at 400 for Streamlit Cloud stability
-        docs = process_pdf_with_pdfplumber(pdf_path, max_pages=400)
-        
+    # ── parse every PDF ───────────────────────────────────────────────────────
+    all_docs = []
+    for doc_idx, pdf_path in enumerate(pdf_paths):
+        doc_label = os.path.basename(pdf_path)
+        size_mb   = os.path.getsize(pdf_path) / 1_048_576
+
+        print(f"\n[{doc_idx+1}/{len(pdf_paths)}] Parsing: {doc_label} ({size_mb:.1f} MB)")
+
+        # Progress bar: parsing phase covers 0.05 → 0.60
+        parse_start = 0.05 + doc_idx * (0.55 / len(pdf_paths))
+        parse_end   = 0.05 + (doc_idx + 1) * (0.55 / len(pdf_paths))
+
+        def _progress(fraction: float, msg: str, _s=parse_start, _e=parse_end):
+            if st_progress_bar:
+                overall = _s + fraction * (_e - _s)
+                st_progress_bar.progress(overall, text=f"[Doc {doc_idx+1}/{len(pdf_paths)}] {msg}")
+            print(f"   [{int(fraction*100):3d}%] {msg}")
+
+        docs = process_pdf_with_pdfplumber(
+            pdf_path,
+            progress_callback=_progress,
+            max_pages=900,
+        )
+
         if docs:
-            print(f"📤 Uploading {len(docs)} chunks from {os.path.basename(pdf_path)} to Pinecone...")
-            if vectorstore is None:
-                vectorstore = PineconeVectorStore.from_documents(
-                    documents=docs,
-                    embedding=embeddings,
-                    index_name=PINECONE_INDEX_NAME,
-                    namespace=ipo_name
-                )
-            else:
-                vectorstore.add_documents(documents=docs)
-            
-            # --- CRITICAL: RELEASE RAM ---
-            del docs
-            gc.collect() 
-            print(f"🧹 RAM Cleared after PDF {idx+1}")
+            # Tag each chunk with which source file it came from
+            for d in docs:
+                d.metadata["source_file"] = doc_label
+            all_docs.extend(docs)
+            tables = sum(1 for d in docs if d.metadata.get("type") == "table")
+            print(f"   → {len(docs)} chunks ({tables} tables) from {doc_label}")
+        else:
+            print(f"   ⚠️  No content extracted from {doc_label}.")
+
+    if not all_docs:
+        print(f"❌ No content extracted from any document for {ipo_name}.")
+        return None
+
+    total_chunks  = len(all_docs)
+    total_tables  = sum(1 for d in all_docs if d.metadata.get("type") == "table")
+    print(f"\n✅ Total: {total_chunks} chunks ({total_tables} tables) across {len(pdf_paths)} file(s).")
 
     if st_progress_bar:
-        st_progress_bar.progress(1.0, text="Process Complete! Ready to Chat.")
+        st_progress_bar.progress(0.60, text=f"Embedding {total_chunks} chunks into ChromaDB…")
 
+    # ── embed in batches ──────────────────────────────────────────────────────
+    embeddings    = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    batch_size    = 64
+    vectorstore   = None
+
+    for i in range(0, total_chunks, batch_size):
+        batch = all_docs[i : i + batch_size]
+        if vectorstore is None:
+            # Pinecone handles batching internally via the LangChain wrapper
+            vectorstore = PineconeVectorStore.from_documents(
+                documents=all_docs,
+                embedding=embeddings,
+                index_name=PINECONE_INDEX_NAME,
+                namespace=ipo_name
+            )
+        else:
+            vectorstore.add_documents(documents=batch)
+
+        if st_progress_bar:
+            embed_frac = min((i + batch_size) / total_chunks, 1.0)
+            overall    = 0.60 + embed_frac * 0.38
+            st_progress_bar.progress(
+                min(overall, 0.98),
+                text=f"Embedding {min(i + batch_size, total_chunks)}/{total_chunks} chunks…",
+            )
+
+    print(f"✅ Embedding complete! Data synced to cloud.")
     return vectorstore
 
 
