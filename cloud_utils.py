@@ -29,6 +29,8 @@ def upload_pdf_to_cloud(ipo_name: str, local_path: str):
     safe_name = ipo_name.replace(" ", "_")
     with open(local_path, "rb") as f:
         sb_client.storage.from_("rhp-pdfs").upload(f"{safe_name}.pdf", f, {"upsert": "true"})
+        # Pass it as a dictionary with the specific key 'upsert'
+        sb_client.storage.from_("rhp-pdfs").upload(path=f"{safe_name}.pdf", file=f, file_options={"upsert": "true"})
 
 # --- PINECONE (Vectors) ---
 def namespace_exists(ipo_name: str):
