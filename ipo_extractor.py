@@ -19,7 +19,7 @@ from typing import Optional, List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_groq import ChatGroq
-from langchain_chroma import Chroma
+# from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 
 from cloud_utils import get_cached_profile, save_profile_to_cache
