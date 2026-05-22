@@ -29,11 +29,11 @@ def upload_pdf_to_cloud(ipo_name: str, local_path: str):
     safe_name = ipo_name.replace(" ", "_")
     try:
         with open(local_path, "rb") as f:
-        sb_client.storage.from_("rhp-pdfs").upload(
-            path=f"{safe_name}.pdf", 
-            file=f, 
-            file_options={"content-type": "application/pdf", "upsert": "true"}
-        )
+            sb_client.storage.from_("rhp-pdfs").upload(
+                path=f"{safe_name}.pdf", 
+                file=f, 
+                file_options={"content-type": "application/pdf", "upsert": "true"}
+            )
         print(f"✅ Uploaded {safe_name}.pdf to Supabase")
     except Exception as e:
         # This will prevent the app from crashing even if upload fails
