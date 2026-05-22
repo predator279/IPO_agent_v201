@@ -17,7 +17,7 @@ import shutil
 from typing import Optional
 
 # Vector store & embeddings
-from langchain_chroma import Chroma
+# from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 # BM25 sparse retriever
